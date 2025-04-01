@@ -136,45 +136,61 @@ def _create_unsloth_optimizer(
 pass
 
 def _setup_gradient_scaler(trainer):
-    """Setup FP16-friendly gradient scaler for the trainer if needed.
-    
-    Args:
-        trainer: The UnslothTrainer instance
-    """
-    # Only proceed if we have an accelerator with a scaler
-    if not (hasattr(trainer, "accelerator") and 
-            hasattr(trainer.accelerator, "scaler") and 
-            trainer.accelerator.scaler is not None):
+    """Setup FP16-friendly gradient scaler for the trainer if needed."""
+    print(">>> DBG: Entered _setup_gradient_scaler") # <<< ADDED
+
+    # Check 1: Does the default scaler exist?
+    accelerator_exists = hasattr(trainer, "accelerator")
+    scaler_exists = accelerator_exists and hasattr(trainer.accelerator, "scaler")
+    scaler_is_valid = scaler_exists and trainer.accelerator.scaler is not None
+    print(f">>> DBG: Checking prerequisites: accelerator={accelerator_exists}, scaler_attr={scaler_exists}, scaler_valid={scaler_is_valid}") # <<< ADDED
+
+    if not scaler_is_valid:
+        print(">>> DBG: Exiting _setup_gradient_scaler - prerequisites not met.") # <<< ADDED
         return
     pass
-    
-    # Check if user explicitly configured FP16 gradient handling
+    print(f">>> DBG: Initial scaler type: {type(trainer.accelerator.scaler)}") # <<< ADDED
+
+    # Check explicit configuration
     allow_fp16_gradients = getattr(trainer.args, "allow_fp16_gradients", None)
-    
-    # If explicitly disabled, return early
+    print(f">>> DBG: User arg 'allow_fp16_gradients' = {allow_fp16_gradients}") # <<< ADDED
+
+    # Check 2: Is it explicitly disabled?
     if allow_fp16_gradients is False:
+        print(">>> DBG: Exiting _setup_gradient_scaler - explicitly disabled by user arg.") # <<< ADDED
         return
     pass
-        
-    # If explicitly enabled, use FP16 scaler regardless of hardware
+
+    need_fp16_scaler = False # Initialize
+
+    # Determine if scaler is needed
     if allow_fp16_gradients is True:
+        print(">>> DBG: 'allow_fp16_gradients' is True - Forcing FP16 scaler.") # <<< ADDED
         need_fp16_scaler = True
     else:
-        # Otherwise auto-detect based on hardware and training mode
-        need_fp16_scaler = False
-        
-        # Check if we're using a GPU without bfloat16 support
+        # Auto-detect logic
+        print(">>> DBG: 'allow_fp16_gradients' is None or not set - Proceeding with auto-detection.") # <<< ADDED
         bf16_supported = is_bfloat16_supported()
-        
-        # Need FP16 scaler if using FP16 on hardware without BF16 support
-        if not bf16_supported and hasattr(trainer.args, "fp16") and trainer.args.fp16:
-            need_fp16_scaler = True
+        fp16_arg_present = hasattr(trainer.args, "fp16")
+        fp16_arg_value = getattr(trainer.args, "fp16", False) # Get value, default to False if not present
+        print(f">>> DBG: Auto-detect check: bf16_supported={bf16_supported}, fp16_arg_present={fp16_arg_present}, fp16_arg_value={fp16_arg_value}") # <<< ADDED
+
+        # Check 3: Auto-detect condition
+        if not bf16_supported and fp16_arg_value: # Only need fp16_arg_value here now
+             print(">>> DBG: Auto-detect condition MET (NOT bf16_supported AND fp16=True). Setting need_fp16_scaler = True.") # <<< ADDED
+             need_fp16_scaler = True
+        else:
+             print(">>> DBG: Auto-detect condition NOT MET. Setting need_fp16_scaler = False.") # <<< ADDED
         pass
     pass
-    
-    # Apply the FP16 gradient scaler if needed
+
+    print(f">>> DBG: Final check - need_fp16_scaler = {need_fp16_scaler}") # <<< ADDED
+
+    # Check 4: Apply the scaler if needed
     if need_fp16_scaler:
+        print(">>> DBG: Condition met, attempting to apply FP16GradScaler.") # <<< ADDED
         old_scaler = trainer.accelerator.scaler
+        # Ensure FP16GradScaler is defined correctly in this file or imported
         new_scaler = FP16GradScaler(
             init_scale=old_scaler.get_scale(),
             growth_factor=old_scaler.get_growth_factor(),
@@ -183,8 +199,13 @@ def _setup_gradient_scaler(trainer):
             enabled=old_scaler.is_enabled()
         )
         trainer.accelerator.scaler = new_scaler
-        print("Unsloth: Using FP16-friendly gradient scaler for mixed precision training.")
+        # This is the original print message you were looking for:
+        print("Unsloth: Using FP16-friendly gradient scaler for mixed precision training.") # <<< KEEP THIS
+        print(f">>> DBG: Applied FP16GradScaler. New scaler type: {type(trainer.accelerator.scaler)}") # <<< ADDED
+    else:
+        print(">>> DBG: Skipping application of FP16GradScaler.") # <<< ADDED
     pass
+    print(">>> DBG: Exiting _setup_gradient_scaler function normally.") # <<< ADDED
 pass
 
 class UnslothTrainer(SFTTrainer):
