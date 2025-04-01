@@ -16,7 +16,9 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 from functools import wraps
+from torch.cuda.amp import GradScaler as TorchGradScaler
 
+import torch
 import trl
 import inspect
 from trl import SFTTrainer
@@ -36,6 +38,7 @@ __all__ = [
     "unsloth_train",
     "_patch_trl_trainer",
     "UnslothVisionDataCollator",
+    "FP16GradScaler"
 ]
 
 # Unsloth gradient accumulation fix:
@@ -72,8 +75,22 @@ class UnslothTrainingArguments(TrainingArguments):
         default = None,
         metadata = {"help" : "Different learning rates for embeddings and lm_head."}
     )
+    allow_fp16_gradients: Optional[bool] = field(
+        default=None,
+        metadata={"help": "Allow FP16 gradients during unscaling. Auto-detects by default, set to True to force enable."}
+    )
 pass
 
+class FP16GradScaler(TorchGradScaler):
+    """
+    GradScaler that allows unscaling FP16 gradients for mixed precision training with fp16 embeddings.
+    
+    This is useful when training models with FP16 embeddings on GPUs that don't support BF16, 
+    as it prevents "Attempting to unscale FP16 gradients" errors during backpropagation.
+    """
+    def _unscale_grads_(self, optimizer, inv_scale, found_inf, allow_fp16=False):
+        return super()._unscale_grads_(optimizer, inv_scale, found_inf, True)
+pass
 
 def _create_unsloth_optimizer(
     model,
@@ -118,6 +135,57 @@ def _create_unsloth_optimizer(
     return optimizer
 pass
 
+def _setup_gradient_scaler(trainer):
+    """Setup FP16-friendly gradient scaler for the trainer if needed.
+    
+    Args:
+        trainer: The UnslothTrainer instance
+    """
+    # Only proceed if we have an accelerator with a scaler
+    if not (hasattr(trainer, "accelerator") and 
+            hasattr(trainer.accelerator, "scaler") and 
+            trainer.accelerator.scaler is not None):
+        return
+    pass
+    
+    # Check if user explicitly configured FP16 gradient handling
+    allow_fp16_gradients = getattr(trainer.args, "allow_fp16_gradients", None)
+    
+    # If explicitly disabled, return early
+    if allow_fp16_gradients is False:
+        return
+    pass
+        
+    # If explicitly enabled, use FP16 scaler regardless of hardware
+    if allow_fp16_gradients is True:
+        need_fp16_scaler = True
+    else:
+        # Otherwise auto-detect based on hardware and training mode
+        need_fp16_scaler = False
+        
+        # Check if we're using a GPU without bfloat16 support
+        bf16_supported = is_bfloat16_supported()
+        
+        # Need FP16 scaler if using FP16 on hardware without BF16 support
+        if not bf16_supported and hasattr(trainer.args, "fp16") and trainer.args.fp16:
+            need_fp16_scaler = True
+        pass
+    pass
+    
+    # Apply the FP16 gradient scaler if needed
+    if need_fp16_scaler:
+        old_scaler = trainer.accelerator.scaler
+        new_scaler = FP16GradScaler(
+            init_scale=old_scaler.get_scale(),
+            growth_factor=old_scaler.get_growth_factor(),
+            backoff_factor=old_scaler.get_backoff_factor(),
+            growth_interval=old_scaler.get_growth_interval(),
+            enabled=old_scaler.is_enabled()
+        )
+        trainer.accelerator.scaler = new_scaler
+        print("Unsloth: Using FP16-friendly gradient scaler for mixed precision training.")
+    pass
+pass
 
 class UnslothTrainer(SFTTrainer):
     def create_optimizer(self):
@@ -134,6 +202,11 @@ class UnslothTrainer(SFTTrainer):
             )
         pass
         return self.optimizer
+    pass
+    def _setup_training(self):
+        """Setup training environment including FP16 gradient handling if needed"""
+        super()._setup_training()
+        _setup_gradient_scaler(self)
     pass
 pass
 
