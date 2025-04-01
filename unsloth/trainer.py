@@ -153,85 +153,22 @@ def _setup_gradient_scaler(trainer):
     
     # If explicitly disabled, return early
     if allow_fp16_gradients is False:
-        print("Unsloth: FP16 gradient handling explicitly disabled.")
         return
     pass
         
     # If explicitly enabled, use FP16 scaler regardless of hardware
     if allow_fp16_gradients is True:
         need_fp16_scaler = True
-        print("Unsloth: FP16 gradient handling explicitly enabled.")
     else:
-        # Otherwise auto-detect based on hardware, training mode AND target modules
+        # Otherwise auto-detect based on hardware and training mode
         need_fp16_scaler = False
         
-        # Check hardware support for bfloat16
+        # Check if we're using a GPU without bfloat16 support
         bf16_supported = is_bfloat16_supported()
-        if not bf16_supported:
-            print("Unsloth: Detected GPU without bfloat16 support.")
-        else:
-            print("Unsloth: Detected GPU with bfloat16 support.")
         
-        # Check if using fp16 training
-        is_fp16_training = hasattr(trainer.args, "fp16") and trainer.args.fp16
-        if is_fp16_training:
-            print("Unsloth: Training with fp16 enabled.")
-        else:
-            print("Unsloth: Not using fp16 training.")
-        
-        # Check for trainable embed_tokens and lm_head
-        training_embed_tokens = False
-        training_lm_head = False
-        
-        # Look for these modules in trainable parameters
-        for name, param in trainer.model.named_parameters():
-            if not param.requires_grad:
-                continue
-                
-            if name.endswith("modules_to_save.default.weight"):
-                partial_name = name[:-len(".modules_to_save.default.weight")]
-                partial_name = partial_name[partial_name.rfind(".")+1:]
-                
-                if partial_name == "embed_tokens":
-                    training_embed_tokens = True
-                    print(f"Unsloth: Detected trainable embed_tokens in parameters.")
-                    
-                if partial_name == "lm_head":
-                    training_lm_head = True
-                    print(f"Unsloth: Detected trainable lm_head in parameters.")
-        pass
-        
-        # Only activate if ALL conditions are met:
-        # 1. No BF16 support
-        # 2. Using FP16 training
-        # 3. Training either embed_tokens or lm_head
-        if (not bf16_supported and 
-            is_fp16_training and 
-            (training_embed_tokens or training_lm_head)):
-            
+        # Need FP16 scaler if using FP16 on hardware without BF16 support
+        if not bf16_supported and hasattr(trainer.args, "fp16") and trainer.args.fp16:
             need_fp16_scaler = True
-            
-            condition_log = []
-            if not bf16_supported:
-                condition_log.append("GPU without BF16 support")
-            if is_fp16_training:
-                condition_log.append("FP16 training enabled")
-            if training_embed_tokens:
-                condition_log.append("embed_tokens in trainable modules")
-            if training_lm_head:
-                condition_log.append("lm_head in trainable modules")
-                
-            print(f"Unsloth: FP16 gradient handling needed due to: {', '.join(condition_log)}")
-        else:
-            reasons = []
-            if bf16_supported:
-                reasons.append("GPU supports BF16")
-            if not is_fp16_training:
-                reasons.append("not using FP16 training")
-            if not (training_embed_tokens or training_lm_head):
-                reasons.append("not training embedding layers")
-                
-            print(f"Unsloth: Standard gradient scaler used because: {', '.join(reasons)}")
         pass
     pass
     
@@ -249,7 +186,6 @@ def _setup_gradient_scaler(trainer):
         print("Unsloth: Using FP16-friendly gradient scaler for mixed precision training.")
     pass
 pass
-
 
 class UnslothTrainer(SFTTrainer):
     def create_optimizer(self):
