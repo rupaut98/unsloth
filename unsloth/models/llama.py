@@ -1859,9 +1859,7 @@ class FastLlamaModel:
             layer.self_attn.apply_o   = original_apply_o
         pass
 
-        fp16_scaler_patch_code = r"""
-        # +++ Unsloth FP16 GradScaler Patch (Injected into Fast Loop String) +++
-        print(">>> [Fast Loop Patch String] Checking FP16 GradScaler requirements...")
+        fp16_scaler_patch_code = r"""print(">>> [Fast Loop Patch String] Checking FP16 GradScaler requirements...")
         if hasattr(self, "accelerator") and hasattr(self.accelerator, "scaler") and self.accelerator.scaler is not None:
             current_scaler = self.accelerator.scaler
             # Use the FP16GradScaler class defined globally in this module
@@ -1930,6 +1928,7 @@ class FastLlamaModel:
         pass
         
         import transformers.trainer
+        import textwrap
         items_in_trainer = dir(transformers.trainer)
         good_items = []
         for item in items_in_trainer:
@@ -1966,21 +1965,26 @@ class FastLlamaModel:
         # Find the target line and its indentation in the *current* state of inner_training_loop
         match = re.search(rf"^([\s\t]*){re.escape(target_line_start)}", inner_training_loop, re.MULTILINE)
         if match:
-            injection_indentation = match.group(1) # Get the leading whitespace (indentation)
+            injection_indentation = match.group(1) # Get correct indentation level
+            print(f"DEBUG: Captured indentation: [{injection_indentation}] (Length: {len(injection_indentation)})") # Optional debug
 
-            # Add the correct indentation to our patch code string
-            indented_patch_code = "\n".join([injection_indentation + line for line in fp16_scaler_patch_code.strip().split('\n')])
+            # 1. Dedent the patch code string first
+            dedented_patch_code = textwrap.dedent(fp16_scaler_patch_code).strip()
 
-            # Insert the indented patch code *before* the target line
-            # Replace the found line with: patch_code + newline + found_line
+            # 2. Add the injection indentation to each line of the *dedented* code
+            indented_patch_code_lines = []
+            for line in dedented_patch_code.split('\n'):
+                 indented_patch_code_lines.append(injection_indentation + line)
+            indented_patch_code = "\n".join(indented_patch_code_lines)
+
+            # [Check 14: Perform the string insertion]
             inner_training_loop = inner_training_loop.replace(
-                match.group(0), # The full matched line (e.g., "        debug_info =")
-                indented_patch_code + "\n" + match.group(0), # Insert patch code + newline before it
-                1 # Replace only the first occurrence
+                match.group(0), # Replace the whole anchor line...
+                indented_patch_code + "\n" + match.group(0), # ...with patch + newline + anchor line
+                1 # Only do it once
             )
             print(">>> [String Injection] Successfully injected FP16 patch code into inner_training_loop string.")
         else:
-            # Fallback or error if the anchor line isn't found
             print(">>> [String Injection] WARNING: Could not find the 'debug_info =' injection point for FP16 patch. Patch might not be applied.")
 
         debug_info = """n_total_devices = total_train_batch_size // \\
