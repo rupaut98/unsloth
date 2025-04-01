@@ -31,6 +31,16 @@ from unsloth_zoo.vision_utils import (
 )
 from packaging.version import Version
 import dataclasses
+import logging
+
+# Configure logger
+logger = logging.getLogger("unsloth.fp16")
+logger.setLevel(logging.INFO)
+
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter('%(name)s: %(message)s'))
+    logger.addHandler(handler)
 
 __all__ = [
     "UnslothTrainingArguments",
@@ -141,10 +151,13 @@ def _setup_gradient_scaler(trainer):
     Args:
         trainer: The UnslothTrainer instance
     """
+    logger.info("Checking gradient scaler requirements")
+    
     # Only proceed if we have an accelerator with a scaler
     if not (hasattr(trainer, "accelerator") and 
             hasattr(trainer.accelerator, "scaler") and 
             trainer.accelerator.scaler is not None):
+        logger.info("No valid scaler found in accelerator, skipping FP16 gradient handling setup")
         return
     pass
     
@@ -153,14 +166,14 @@ def _setup_gradient_scaler(trainer):
     
     # If explicitly disabled, return early
     if allow_fp16_gradients is False:
-        print("Unsloth: FP16 gradient handling explicitly disabled.")
+        logger.info("FP16 gradient handling explicitly disabled by user")
         return
     pass
         
     # If explicitly enabled, use FP16 scaler regardless of hardware
     if allow_fp16_gradients is True:
         need_fp16_scaler = True
-        print("Unsloth: FP16 gradient handling explicitly enabled.")
+        logger.info("FP16 gradient handling explicitly enabled by user")
     else:
         # Otherwise auto-detect based on hardware, training mode AND target modules
         need_fp16_scaler = False
@@ -168,20 +181,23 @@ def _setup_gradient_scaler(trainer):
         # Check hardware support for bfloat16
         bf16_supported = is_bfloat16_supported()
         if not bf16_supported:
-            print("Unsloth: Detected GPU without bfloat16 support.")
+            logger.info("Detected GPU without bfloat16 support")
         else:
-            print("Unsloth: Detected GPU with bfloat16 support.")
+            logger.info("Detected GPU with bfloat16 support")
         
         # Check if using fp16 training
         is_fp16_training = hasattr(trainer.args, "fp16") and trainer.args.fp16
         if is_fp16_training:
-            print("Unsloth: Training with fp16 enabled.")
+            logger.info("Training with fp16 enabled")
         else:
-            print("Unsloth: Not using fp16 training.")
+            logger.info("Not using fp16 training")
         
         # Check for trainable embed_tokens and lm_head
         training_embed_tokens = False
         training_lm_head = False
+        
+        # Log trainable parameter detection
+        logger.info("Scanning model for trainable embedding parameters...")
         
         # Look for these modules in trainable parameters
         for name, param in trainer.model.named_parameters():
@@ -194,11 +210,11 @@ def _setup_gradient_scaler(trainer):
                 
                 if partial_name == "embed_tokens":
                     training_embed_tokens = True
-                    print(f"Unsloth: Detected trainable embed_tokens in parameters.")
+                    logger.info(f"Detected trainable embed_tokens in parameters")
                     
                 if partial_name == "lm_head":
                     training_lm_head = True
-                    print(f"Unsloth: Detected trainable lm_head in parameters.")
+                    logger.info(f"Detected trainable lm_head in parameters")
         pass
         
         # Only activate if ALL conditions are met:
@@ -221,7 +237,7 @@ def _setup_gradient_scaler(trainer):
             if training_lm_head:
                 condition_log.append("lm_head in trainable modules")
                 
-            print(f"Unsloth: FP16 gradient handling needed due to: {', '.join(condition_log)}")
+            logger.info(f"FP16 gradient handling needed due to: {', '.join(condition_log)}")
         else:
             reasons = []
             if bf16_supported:
@@ -231,7 +247,7 @@ def _setup_gradient_scaler(trainer):
             if not (training_embed_tokens or training_lm_head):
                 reasons.append("not training embedding layers")
                 
-            print(f"Unsloth: Standard gradient scaler used because: {', '.join(reasons)}")
+            logger.info(f"Standard gradient scaler used because: {', '.join(reasons)}")
         pass
     pass
     
@@ -246,7 +262,7 @@ def _setup_gradient_scaler(trainer):
             enabled=old_scaler.is_enabled()
         )
         trainer.accelerator.scaler = new_scaler
-        print("Unsloth: Using FP16-friendly gradient scaler for mixed precision training.")
+        logger.info("Using FP16-friendly gradient scaler for mixed precision training")
     pass
 pass
 
