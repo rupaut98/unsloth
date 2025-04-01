@@ -2392,11 +2392,12 @@ class FastLlamaModel:
             assert(hasattr(model.get_input_embeddings(), "modules_to_save"))
 
             new_dtype = model.get_input_embeddings().modules_to_save.default.weight.dtype
-            if new_dtype == torch.float16:
-                # See https://github.com/unslothai/unsloth/pull/1200
-                # Tesla T4 must use float32 and not float16
-                new_dtype = torch.float32
-            pass
+            # if new_dtype == torch.float16:
+            #     # See https://github.com/unslothai/unsloth/pull/1200
+            #     # Tesla T4 must use float32 and not float16
+            #     new_dtype = torch.float32
+            # pass
+
 
             model.get_input_embeddings().modules_to_save.default\
                 .to(device = "cuda", dtype = new_dtype, non_blocking = True)
@@ -2408,11 +2409,11 @@ class FastLlamaModel:
             assert(hasattr(model.get_output_embeddings(), "modules_to_save"))
 
             new_dtype = model.get_output_embeddings().modules_to_save.default.weight.dtype
-            if new_dtype == torch.float16:
-                # See https://github.com/unslothai/unsloth/pull/1200
-                # Tesla T4 must use float32 and not float16
-                new_dtype = torch.float32
-            pass
+            # if new_dtype == torch.float16:
+            #     # See https://github.com/unslothai/unsloth/pull/1200
+            #     # Tesla T4 must use float32 and not float16
+            #     new_dtype = torch.float32
+            # pass
 
             model.get_output_embeddings().modules_to_save.default\
                 .to(device = "cuda", dtype = new_dtype, non_blocking = True)
