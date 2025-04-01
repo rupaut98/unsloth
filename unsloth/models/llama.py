@@ -23,6 +23,7 @@ from ._utils import __version__
 from torch.nn.functional import scaled_dot_product_attention
 from transformers import __version__ as transformers_version
 from unsloth_zoo.utils import Version, _get_dtype
+from torch.cuda.amp import GradScaler as TorchGradScaler
 transformers_version = Version(transformers_version)
 # Transformers moved rotary embeddings out of all attention layers
 IS_ATTENTION_REFACTOR = transformers_version > Version("4.47.1")
@@ -66,6 +67,7 @@ from peft import LoraConfig, TaskType, get_peft_model as _get_peft_model
 from peft import PeftModelForCausalLM
 from ..save import patch_saving_functions
 import re, os, inspect, math, sys
+from .. import is_bfloat16_supported
 import types
 try:
     from huggingface_hub.utils import get_token
@@ -77,6 +79,16 @@ from triton import __version__ as triton_version
 HAS_XFORMERS = xformers is not None
 BlockDiagonalCausalMask = xformers.attn_bias.BlockDiagonalCausalMask if HAS_XFORMERS else None
 
+
+class FP16GradScaler(TorchGradScaler):
+    """
+    GradScaler that allows unscaling FP16 gradients for mixed precision training with fp16 embeddings.
+    From Unsloth's potential trainer.py fix, adapted for direct loop patching.
+    """
+    def _unscale_grads_(self, optimizer, inv_scale, found_inf, allow_fp16=False):
+        # Force allow_fp16=True
+        return super()._unscale_grads_(optimizer, inv_scale, found_inf, True)
+pass
 
 def original_apply_qkv(self, X):
     Q = self.q_proj(X)
@@ -1848,6 +1860,64 @@ class FastLlamaModel:
             layer.self_attn.apply_o   = original_apply_o
         pass
 
+        fp16_scaler_patch_code = r"""
+        # +++ Unsloth FP16 GradScaler Patch (Injected into Fast Loop String) +++
+        print(">>> [Fast Loop Patch String] Checking FP16 GradScaler requirements...")
+        if hasattr(self, "accelerator") and hasattr(self.accelerator, "scaler") and self.accelerator.scaler is not None:
+            current_scaler = self.accelerator.scaler
+            # Use the FP16GradScaler class defined globally in this module
+            if not isinstance(current_scaler, FP16GradScaler):
+                _patch_args = args # Rename to avoid potential conflicts later in loop
+                allow_fp16_gradients = getattr(_patch_args, "allow_fp16_gradients", None)
+                print(f">>> [Fast Loop Patch String] User arg 'allow_fp16_gradients' = {allow_fp16_gradients}")
+
+                need_fp16_scaler = False
+                if allow_fp16_gradients is True:
+                    print(">>> [Fast Loop Patch String] Forcing FP16 scaler due to user arg.")
+                    need_fp16_scaler = True
+                elif allow_fp16_gradients is not False:
+                    print(">>> [Fast Loop Patch String] Auto-detecting FP16 scaler need.")
+                    # Use is_bfloat16_supported function defined globally in this module
+                    bf16_supported = is_bfloat16_supported()
+                    fp16_enabled = getattr(_patch_args, "fp16", False)
+                    print(f">>> [Fast Loop Patch String] Auto-detect check: bf16_supported={bf16_supported}, fp16_enabled={fp16_enabled}")
+                    if not bf16_supported and fp16_enabled:
+                        print(">>> [Fast Loop Patch String] Auto-detect condition MET.")
+                        need_fp16_scaler = True
+                    else:
+                        print(">>> [Fast Loop Patch String] Auto-detect condition NOT MET.")
+                else:
+                    print(">>> [Fast Loop Patch String] FP16 scaler explicitly disabled by user arg.")
+
+                if need_fp16_scaler:
+                    print(">>> [Fast Loop Patch String] Applying FP16GradScaler...")
+                    try:
+                        # Use FP16GradScaler class defined globally in this module
+                        new_scaler = FP16GradScaler(
+                            init_scale=current_scaler.get_scale(),
+                            growth_factor=current_scaler.get_growth_factor(),
+                            backoff_factor=current_scaler.get_backoff_factor(),
+                            growth_interval=current_scaler.get_growth_interval(),
+                            enabled=current_scaler.is_enabled()
+                        )
+                        self.accelerator.scaler = new_scaler
+                        print(f">>> [Fast Loop Patch String] Successfully applied FP16GradScaler. New type: {type(self.accelerator.scaler)}")
+                    except Exception as e:
+                        print(f">>> [Fast Loop Patch String] ERROR applying FP16GradScaler: {e}")
+                else:
+                    print(">>> [Fast Loop Patch String] FP16GradScaler not needed or disabled.")
+            else:
+                print(">>> [Fast Loop Patch String] Scaler is already FP16GradScaler.")
+        else:
+            print(">>> [Fast Loop Patch String] Accelerator or scaler not found, cannot patch.")
+        # Ensure gc and torch are available if not already imported in the loop string's scope
+        import gc
+        import torch
+        gc.collect()
+        torch.cuda.empty_cache()
+        # +++ End of Unsloth FP16 GradScaler Patch +++
+        """
+
         # Patch Trainer
         from transformers.trainer import Trainer
         try:
@@ -1891,6 +1961,28 @@ class FastLlamaModel:
         debug_info = debug_info.split('\n')
         debug_info = "\n".join([debug_info[0]] + [spaces + x[8:] for x in debug_info[1:]])
         inner_training_loop = inner_training_loop.replace(original_debug, debug_info)
+
+        target_line_start = "debug_info =" # The start of the line we will insert *before*
+
+        # Find the target line and its indentation in the *current* state of inner_training_loop
+        match = re.search(rf"^([\s\t]*){re.escape(target_line_start)}", inner_training_loop, re.MULTILINE)
+        if match:
+            injection_indentation = match.group(1) # Get the leading whitespace (indentation)
+
+            # Add the correct indentation to our patch code string
+            indented_patch_code = "\n".join([injection_indentation + line for line in fp16_scaler_patch_code.strip().split('\n')])
+
+            # Insert the indented patch code *before* the target line
+            # Replace the found line with: patch_code + newline + found_line
+            inner_training_loop = inner_training_loop.replace(
+                match.group(0), # The full matched line (e.g., "        debug_info =")
+                indented_patch_code + "\n" + match.group(0), # Insert patch code + newline before it
+                1 # Replace only the first occurrence
+            )
+            print(">>> [String Injection] Successfully injected FP16 patch code into inner_training_loop string.")
+        else:
+            # Fallback or error if the anchor line isn't found
+            print(">>> [String Injection] WARNING: Could not find the 'debug_info =' injection point for FP16 patch. Patch might not be applied.")
 
         debug_info = """n_total_devices = total_train_batch_size // \\
             args.gradient_accumulation_steps // self._train_batch_size
@@ -2115,11 +2207,11 @@ class FastLlamaModel:
                     print("Unsloth: Training embed_tokens in mixed precision to save VRAM")
 
                     new_dtype = model.get_input_embeddings().modules_to_save.default.weight.dtype
-                    if new_dtype == torch.float16:
-                        # See https://github.com/unslothai/unsloth/pull/1200
-                        # Tesla T4 must use float32 and not float16
-                        new_dtype = torch.float32
-                    pass
+                    # if new_dtype == torch.float16:
+                    #     # See https://github.com/unslothai/unsloth/pull/1200
+                    #     # Tesla T4 must use float32 and not float16
+                    #     new_dtype = torch.float32
+                    # pass
 
                     model.get_input_embeddings().modules_to_save.default\
                         .to(device = "cuda", dtype = new_dtype, non_blocking = True)
@@ -2135,11 +2227,11 @@ class FastLlamaModel:
                     print("Unsloth: Training lm_head in mixed precision to save VRAM")
 
                     new_dtype = model.get_output_embeddings().modules_to_save.default.weight.dtype
-                    if new_dtype == torch.float16:
-                        # See https://github.com/unslothai/unsloth/pull/1200
-                        # Tesla T4 must use float32 and not float16
-                        new_dtype = torch.float32
-                    pass
+                    # if new_dtype == torch.float16:
+                    #     # See https://github.com/unslothai/unsloth/pull/1200
+                    #     # Tesla T4 must use float32 and not float16
+                    #     new_dtype = torch.float32
+                    # pass
 
                     model.get_output_embeddings().modules_to_save.default\
                         .to(device = "cuda", dtype = new_dtype, non_blocking = True)
@@ -2392,11 +2484,11 @@ class FastLlamaModel:
             assert(hasattr(model.get_input_embeddings(), "modules_to_save"))
 
             new_dtype = model.get_input_embeddings().modules_to_save.default.weight.dtype
-            if new_dtype == torch.float16:
-                # See https://github.com/unslothai/unsloth/pull/1200
-                # Tesla T4 must use float32 and not float16
-                new_dtype = torch.float32
-            pass
+            # if new_dtype == torch.float16:
+            #     # See https://github.com/unslothai/unsloth/pull/1200
+            #     # Tesla T4 must use float32 and not float16
+            #     new_dtype = torch.float32
+            # pass
 
             model.get_input_embeddings().modules_to_save.default\
                 .to(device = "cuda", dtype = new_dtype, non_blocking = True)
@@ -2408,11 +2500,11 @@ class FastLlamaModel:
             assert(hasattr(model.get_output_embeddings(), "modules_to_save"))
 
             new_dtype = model.get_output_embeddings().modules_to_save.default.weight.dtype
-            if new_dtype == torch.float16:
-                # See https://github.com/unslothai/unsloth/pull/1200
-                # Tesla T4 must use float32 and not float16
-                new_dtype = torch.float32
-            pass
+            # if new_dtype == torch.float16:
+            #     # See https://github.com/unslothai/unsloth/pull/1200
+            #     # Tesla T4 must use float32 and not float16
+            #     new_dtype = torch.float32
+            # pass
 
             model.get_output_embeddings().modules_to_save.default\
                 .to(device = "cuda", dtype = new_dtype, non_blocking = True)
