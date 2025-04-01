@@ -67,7 +67,6 @@ from peft import LoraConfig, TaskType, get_peft_model as _get_peft_model
 from peft import PeftModelForCausalLM
 from ..save import patch_saving_functions
 import re, os, inspect, math, sys
-from .. import is_bfloat16_supported
 import types
 try:
     from huggingface_hub.utils import get_token
