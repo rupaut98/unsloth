@@ -16,6 +16,7 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 from functools import wraps
+from torch.cuda.amp import GradScaler as TorchGradScaler
 
 import trl
 import inspect
@@ -30,12 +31,18 @@ from unsloth_zoo.vision_utils import (
 from packaging.version import Version
 import dataclasses
 
+class FP16GradScaler(TorchGradScaler):
+    """GradScaler that allows unscaling FP16 gradients for mixed precision training with fp16 embeddings"""
+    def _unscale_grads_(self, optimizer, inv_scale, found_inf, allow_fp16=False):
+        return super()._unscale_grads_(optimizer, inv_scale, found_inf, True)
+    
 __all__ = [
     "UnslothTrainingArguments",
     "UnslothTrainer",
     "unsloth_train",
     "_patch_trl_trainer",
     "UnslothVisionDataCollator",
+    "FP16GradScaler"
 ]
 
 # Unsloth gradient accumulation fix:
@@ -134,6 +141,21 @@ class UnslothTrainer(SFTTrainer):
             )
         pass
         return self.optimizer
+    pass
+    def _setup_training(self):
+        """Setup the accelerator with our FP16-friendly gradient scaler"""
+        super()._setup_training()
+        if hasattr(self, "accelerator") and hasattr(self.accelerator, "scaler") and self.accelerator.scaler is not None:
+            # Replace the default scaler with our FP16-friendly version
+            old_scaler = self.accelerator.scaler
+            new_scaler = FP16GradScaler(
+                init_scale=old_scaler.get_scale(),
+                growth_factor=old_scaler.get_growth_factor(),
+                backoff_factor=old_scaler.get_backoff_factor(),
+                growth_interval=old_scaler.get_growth_interval(),
+                enabled=old_scaler.is_enabled()
+            )
+            self.accelerator.scaler = new_scaler
     pass
 pass
 
