@@ -2351,6 +2351,104 @@ class FastLlamaModel:
 
         _saved_temp_tokenizer = model._saved_temp_tokenizer
 
+        import logging
+        import bitsandbytes as bnb # Import bitsandbytes if checking Linear4bit/8bit types
+
+        logger = logging.getLogger(__name__) # Make sure logger is defined
+
+        # Prepare the initial list of simple target module names
+        # (This logic should already exist in the function before the insertion point,
+        # resulting in the variable `final_modules`)
+        # Example: final_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+        refined_target_modules = final_modules # Default if not Gemma 3 or filtering fails
+
+        # Gemma 3 specific PEFT target module refinement
+        # Check if the model config exists and model_type is gemma3 (or potentially gemma2)
+        model_config = getattr(model, "config", None)
+        model_type = getattr(model_config, "model_type", None)
+
+        if model_type in ["gemma3"]: # Include gemma2 as it might share structure
+            logger.info(f"Unsloth: Applying {model_type} specific PEFT targeting logic.")
+            print(f"Unsloth: Applying {model_type} specific PEFT targeting logic.") # Add print for visibility
+
+            possible_target_modules = set(final_modules) # Use set for faster lookup
+            filtered_module_paths = []
+            potential_module_types = (torch.nn.Linear, bnb.nn.Linear4bit, bnb.nn.Linear8bitLt)
+
+            # --- Heuristic to find the core model component containing 'layers' and 'vision_tower' ---
+            core_model = None
+            path_prefix = ""
+            current_level = model
+            potential_wrappers = ["base_model", "model"] # Common wrappers
+
+            for wrapper_name in potential_wrappers:
+                if hasattr(current_level, wrapper_name):
+                    # Check if the *next* level contains expected structures BEFORE descending
+                    next_level = getattr(current_level, wrapper_name)
+                    # A reasonable check: does it have 'layers' or 'language_model'?
+                    # And does it potentially have 'vision_tower'? (Presence of vision_tower is key)
+                    has_text_indicator = hasattr(next_level, 'layers') or hasattr(next_level, 'language_model')
+                    has_vision_indicator = hasattr(next_level, 'vision_tower')
+
+                    if has_text_indicator and has_vision_indicator:
+                         core_model = next_level
+                         path_prefix += wrapper_name + "."
+                         break # Found the likely core component
+                    elif has_text_indicator: # If only text indicator found, descend anyway
+                         current_level = next_level
+                         path_prefix += wrapper_name + "."
+                    else: # If next level doesn't look right, stop descending this path
+                         break
+                else:
+                    break # Wrapper not found
+
+            if core_model is None:
+                # If heuristic failed, assume the current level *might* be the core, or default back
+                if hasattr(current_level, 'layers') or hasattr(current_level, 'language_model'):
+                     core_model = current_level
+                else:
+                     logger.warning(f"Unsloth: Could not reliably determine core model path for {model_type} PEFT filtering. PEFT might target incorrect layers. Check model structure.")
+                     core_model = model # Use the original model as a last resort
+                     path_prefix = "" # Reset prefix if we defaulted back to the top
+
+            print(f"Unsloth: Identified core model part for iteration: {type(core_model)}")
+            print(f"Unsloth: Path prefix used (relative to PeftModel): '{path_prefix}'")
+            # -----------------------------------------------------------------------------------
+
+            try:
+                # Iterate through modules *within* the identified core model part
+                for name, module in core_model.named_modules():
+                    # Extract the final part of the name (the simple module name)
+                    module_name_simple = name.split('.')[-1]
+
+                    if module_name_simple in possible_target_modules:
+                        # Construct the full path relative to the *top-level* model object Peft expects
+                        full_path = path_prefix + name
+
+                        # *** CRUCIAL FILTER: Exclude vision_tower ***
+                        if "vision_tower" not in name:
+                            # Check if module type is suitable
+                            if isinstance(module, potential_module_types):
+                                filtered_module_paths.append(full_path)
+                            # else: print(f"Unsloth: Skipping non-target-type: {full_path} ({type(module)})") # Debug
+                        # else: print(f"Unsloth: Filtering vision path: {full_path}") # Debug
+
+                if not filtered_module_paths:
+                     logger.warning(f"Unsloth: {model_type} PEFT targeting logic found NO text layers for target_modules: {final_modules}. Check model structure and paths.")
+                     refined_target_modules = final_modules
+                else:
+                     logger.info(f"Unsloth: Refined PEFT targets for {model_type} (found {len(filtered_module_paths)}): {filtered_module_paths[:5]}...")
+                     print(f"Unsloth: Refined PEFT targets for {model_type} (found {len(filtered_module_paths)}): {filtered_module_paths[:5]}...") # Debug print
+                     refined_target_modules = filtered_module_paths
+
+            except Exception as e:
+                logger.error(f"Unsloth: Error during {model_type} PEFT targeting refinement: {e}. Falling back to default targets.")
+                refined_target_modules = final_modules # Fallback on error
+
+        # Update the arguments dictionary to use the refined list for LoraConfig
+        arguments["target_modules"] = refined_target_modules
+
         lora_config = LoraConfig(**arguments)
 
         # First offload lm_head and embed_tokens to disk
