@@ -529,7 +529,6 @@ class FastBaseModel:
         model = FastBaseModel.post_patch_model(model, use_gradient_checkpointing)
         model.max_seq_length = max_seq_length
 
-        import torch
         import logging
         import bitsandbytes as bnb # Keep this import
         from types import SimpleNamespace # To potentially mock config if needed
