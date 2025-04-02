@@ -529,6 +529,79 @@ class FastBaseModel:
         model = FastBaseModel.post_patch_model(model, use_gradient_checkpointing)
         model.max_seq_length = max_seq_length
 
+        import torch
+        import logging
+        import bitsandbytes as bnb # Keep this import
+        from types import SimpleNamespace # To potentially mock config if needed
+        logger = logging.getLogger(__name__)
+
+        # Check model type again, only apply for Gemma 3/2 if needed
+        model_config = getattr(model, "config", None)
+        model_type = getattr(model_config, "model_type", None)
+
+        if model_type in ["gemma3", "gemma2"]: # Apply only if gemma3/2
+            print(f"Unsloth: Applying post-PEFT dtype correction for {model_type} float32 compatibility...")
+
+            # Determine target dtype (should be float32 based on Unsloth message)
+            target_dtype = torch.float32
+            problematic_dtypes = (torch.float16, torch.bfloat16)
+
+            # Get modules_to_save to check if lm_head/embeddings are trained
+            active_adapter_config = model.peft_config.get(model.active_adapters[0]) if hasattr(model, "active_adapters") and model.active_adapters else \
+                                    model.peft_config.get("default")
+
+            # Ensure active_adapter_config is not None before proceeding
+            if active_adapter_config:
+                modules_being_saved = set(getattr(active_adapter_config, "modules_to_save", []) or [])
+                # Check common variations for head/embeddings in modules_to_save
+                train_lm_head = "lm_head" in modules_being_saved or "output_embeddings" in modules_being_saved
+                train_embed_tokens = "embed_tokens" in modules_being_saved or "input_embeddings" in modules_being_saved or "embeddings" in modules_being_saved
+
+                cast_count = 0
+                try:
+                    # Iterate through ALL parameters, including non-trainable ones
+                    for name, param in model.named_parameters():
+                        # Skip trainable parameters (LoRA weights should already be float32)
+                        if param.requires_grad:
+                            continue
+
+                        # Check if the non-trainable parameter is float16 or bfloat16
+                        if param.dtype in problematic_dtypes:
+                            # Flags for conditions
+                            is_norm_related = "layernorm" in name.lower() or "norm" in name.lower()
+                            is_bias = ".bias" in name # Specifically target bias terms
+                            is_untrained_head_embed = False
+                            # Use broad checks based on inspection output
+                            if not train_lm_head and ("lm_head" in name or "output_embedding" in name.lower()):
+                                 is_untrained_head_embed = True
+                            if not train_embed_tokens and ("embed" in name.lower()):
+                                 is_untrained_head_embed = True
+
+                            # Cast if it's norm, bias, or an untrained head/embedding
+                            if is_norm_related or is_bias or is_untrained_head_embed:
+                                # Add print statement before casting
+                                print(f"  [DTYPE CAST] Casting non-trainable param: {name} from {param.dtype} to {target_dtype}")
+                                param.data = param.data.to(target_dtype)
+                                cast_count += 1
+
+                    # Iterate through buffers as well
+                    for name, buf in model.named_buffers():
+                         if buf.dtype in problematic_dtypes:
+                             # Only cast norm-related buffers, others might be intentional (like position_ids)
+                             if "layernorm" in name.lower() or "norm" in name.lower():
+                                 print(f"  [DTYPE CAST] Casting buffer: {name} from {buf.dtype} to {target_dtype}")
+                                 buf.data = buf.data.to(target_dtype)
+                                 cast_count += 1
+
+                    print(f"Unsloth: Post-PEFT dtype correction complete. Cast {cast_count} params/buffers for {model_type}.")
+
+                except Exception as e:
+                    logger.error(f"Unsloth: Error during {model_type} post-PEFT dtype correction: {e}. Model might still have dtype issues.")
+            else:
+                logger.warning("Unsloth: Could not find active PEFT config to determine modules_to_save for dtype correction.")
+        else:
+             print(f"Unsloth: Skipping post-PEFT dtype correction for model_type: {model_type}")
+
         # Clear deleted GPU items
         for _ in range(3):
             gc.collect()
