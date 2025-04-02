@@ -2419,6 +2419,66 @@ class FastLlamaModel:
             model.get_output_embeddings().modules_to_save.default.requires_grad_(True)
         pass
 
+        import logging
+        from types import SimpleNamespace # To potentially mock config if needed
+        logger = logging.getLogger(__name__)
+
+        print("Unsloth: Applying post-PEFT dtype correction for float32 compatibility...")
+
+        # Determine target dtype (should be float32 based on Unsloth message)
+        target_dtype = torch.float32
+        problematic_dtypes = (torch.float16, torch.bfloat16)
+
+        # Get modules_to_save to check if lm_head/embeddings are trained
+        active_adapter_config = model.peft_config.get(model.active_adapters[0]) if hasattr(model, "active_adapters") else \
+                                model.peft_config.get("default")
+        # Ensure active_adapter_config is not None before proceeding
+        if active_adapter_config:
+            modules_being_saved = set(getattr(active_adapter_config, "modules_to_save", []) or [])
+            train_lm_head = "lm_head" in modules_being_saved
+            train_embed_tokens = "embed_tokens" in modules_being_saved
+
+            cast_count = 0
+            try:
+                # Iterate through ALL parameters, including non-trainable ones
+                for name, param in model.named_parameters():
+                    # Skip trainable parameters (LoRA weights should already be float32)
+                    if param.requires_grad:
+                        continue
+
+                    # Check if the non-trainable parameter is float16 or bfloat16
+                    if param.dtype in problematic_dtypes:
+                        # Check if it's part of lm_head or embeddings AND they are NOT being trained
+                        is_untrained_head_embed = False
+                        if not train_lm_head and "lm_head" in name:
+                             is_untrained_head_embed = True
+                        # Refine embedding check based on your detailed inspection output paths
+                        # Example: Check for base_model.model.language_model.model.embed_tokens...
+                        if not train_embed_tokens and ("embed_tokens" in name or "input_embeddings" in name):
+                             is_untrained_head_embed = True
+
+                        # Cast LayerNorm weights/biases and untrained lm_head/embeddings
+                        # Add other specific layer types if needed (e.g., biases of Linear4bit)
+                        if "layernorm" in name.lower() or "norm" in name.lower() or is_untrained_head_embed:
+                            print(f"  Casting non-trainable param {name} from {param.dtype} to {target_dtype}")
+                            param.data = param.data.to(target_dtype)
+                            cast_count += 1
+
+                # Iterate through buffers as well (e.g., some norm implementations use buffers)
+                for name, buf in model.named_buffers():
+                     if buf.dtype in problematic_dtypes:
+                         if "layernorm" in name.lower() or "norm" in name.lower():
+                             print(f"  Casting buffer {name} from {buf.dtype} to {target_dtype}")
+                             buf.data = buf.data.to(target_dtype)
+                             cast_count += 1
+
+                print(f"Unsloth: Post-PEFT dtype correction complete. Cast {cast_count} params/buffers.")
+
+            except Exception as e:
+                logger.error(f"Unsloth: Error during post-PEFT dtype correction: {e}. Model might still have dtype issues.")
+        else:
+            logger.warning("Unsloth: Could not find active PEFT config to determine modules_to_save for dtype correction.")
+
         # Patch tokenizer to pad to the right
         internal_model = model
         while hasattr(internal_model, "model"):
