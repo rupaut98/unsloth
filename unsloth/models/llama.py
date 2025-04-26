@@ -2497,6 +2497,36 @@ class FastLlamaModel:
             use_reentrant = True,
         )
 
+        if os.environ.get("UNSLOTH_FORCE_FLOAT32") == "1":
+            print("Unsloth: Applying post-kbit-prep float32 cast check for output layer (Gemma 3 safety).")
+            try:
+                output_embeddings = model.get_output_embeddings()
+                if output_embeddings is not None:
+                    target_dtype = torch.float32
+                    # Check and cast weights if necessary
+                    if output_embeddings.weight.dtype != target_dtype:
+                        print(f"  WARNING: Casting output embedding weight from {output_embeddings.weight.dtype} to {target_dtype} (should have been done by kbit prep).")
+                        with torch.no_grad():
+                            output_embeddings.weight.copy_(output_embeddings.weight.data.to(target_dtype))
+                        # Preserve requires_grad status (kbit prep should have set it True)
+                        output_embeddings.weight.requires_grad_(True)
+                    else:
+                         print(f"  Output embedding weight confirmed as {target_dtype}.")
+
+                    # Check and cast bias if it exists and needs casting
+                    if hasattr(output_embeddings, 'bias') and output_embeddings.bias is not None:
+                        if output_embeddings.bias.dtype != target_dtype:
+                            print(f"  WARNING: Casting output embedding bias from {output_embeddings.bias.dtype} to {target_dtype}.")
+                            with torch.no_grad():
+                                output_embeddings.bias.copy_(output_embeddings.bias.data.to(target_dtype))
+                            output_embeddings.bias.requires_grad_(True) # If bias is trainable
+                        # else: print(f"  Output embedding bias confirmed as {target_dtype}.") # Less verbose
+                else:
+                    print("  Could not get output embeddings layer for dtype check/cast.")
+            except Exception as e:
+                print(f"  WARNING: Error during post-kbit-prep output layer casting: {e}")
+            pass
+        pass
         # Fix up config for transformers uploading PEFT
         for active_adapter in model.peft_config.keys():
             # Not necessary since we requires transformers >= 4.37
